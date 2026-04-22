@@ -85,17 +85,21 @@ class _FetchModelsWorker(QThread):
             for model in client.models.list():
                 full_name = getattr(model, "name", "") or ""
                 name = full_name.split("/")[-1]
-                if not name.startswith("gemini-"):
+                if not name.startswith("gemini-") and "veo" not in name:
                     continue
                 if not self.allow_preview and "preview" in name.lower():
                     continue
                 models.append(name)
 
-            models = sorted(set(models))
-            if not models:
-                from core.settings_manager import settings
+            # Injeksi model statis yang direkomendasikan agar selalu muncul di UI
+            from core.settings_manager import settings
+            static_models = settings.get_global_gemini_models()
+            for sm in static_models:
+                if not self.allow_preview and "preview" in sm.lower():
+                    continue
+                models.append(sm)
 
-                models = settings.get_global_gemini_models()
+            models = sorted(set(models))
             self.result.emit(models, "")
         except Exception as e:
             self.result.emit([], str(e))
@@ -253,6 +257,10 @@ class SettingsDialog(QDialog):
         stock_grid.setHorizontalSpacing(12)
         stock_grid.setVerticalSpacing(12)
 
+        self.cmb_default_source = QComboBox()
+        self.cmb_default_source.addItem("Pexels", "pexels")
+        self.cmb_default_source.addItem("Pixabay", "pixabay")
+
         self.inp_pexels = QLineEdit()
         self.inp_pexels.setEchoMode(QLineEdit.Password)
         self.inp_pixabay = QLineEdit()
@@ -266,14 +274,16 @@ class SettingsDialog(QDialog):
         self.lbl_status_px.setWordWrap(True)
         self.lbl_status_pb.setWordWrap(True)
 
-        stock_grid.addWidget(QLabel("Pexels API Key"), 0, 0)
-        stock_grid.addWidget(self.inp_pexels, 0, 1)
-        stock_grid.addWidget(btn_test_pexels, 0, 2)
-        stock_grid.addWidget(self.lbl_status_px, 1, 0, 1, 3)
-        stock_grid.addWidget(QLabel("Pixabay API Key"), 2, 0)
-        stock_grid.addWidget(self.inp_pixabay, 2, 1)
-        stock_grid.addWidget(btn_test_pixabay, 2, 2)
-        stock_grid.addWidget(self.lbl_status_pb, 3, 0, 1, 3)
+        stock_grid.addWidget(QLabel("Default Source"), 0, 0)
+        stock_grid.addWidget(self.cmb_default_source, 0, 1, 1, 2)
+        stock_grid.addWidget(QLabel("Pexels API Key"), 1, 0)
+        stock_grid.addWidget(self.inp_pexels, 1, 1)
+        stock_grid.addWidget(btn_test_pexels, 1, 2)
+        stock_grid.addWidget(self.lbl_status_px, 2, 0, 1, 3)
+        stock_grid.addWidget(QLabel("Pixabay API Key"), 3, 0)
+        stock_grid.addWidget(self.inp_pixabay, 3, 1)
+        stock_grid.addWidget(btn_test_pixabay, 3, 2)
+        stock_grid.addWidget(self.lbl_status_pb, 4, 0, 1, 3)
         content_layout.addWidget(self._section_title("Sumber B-roll"))
         content_layout.addWidget(stock_card)
 
@@ -300,12 +310,18 @@ class SettingsDialog(QDialog):
         self.cmb_model_transcribe = QComboBox()
         self.cmb_model_planner = QComboBox()
         self.cmb_model_vision = QComboBox()
+        self.cmb_model_video = QComboBox()
+        self.cmb_model_tts = QComboBox()
         for combo in (
             self.cmb_model_transcribe,
             self.cmb_model_planner,
             self.cmb_model_vision,
+            self.cmb_model_video,
+            self.cmb_model_tts,
         ):
             combo.setEditable(True)
+            combo.currentIndexChanged.connect(self._activate_manual_profile)
+            combo.editTextChanged.connect(self._activate_manual_profile)
 
         self.lbl_model_mode = QLabel("")
         self.lbl_model_mode.setWordWrap(True)
@@ -325,7 +341,11 @@ class SettingsDialog(QDialog):
         model_grid.addWidget(self.cmb_model_planner, 2, 1, 1, 3)
         model_grid.addWidget(QLabel("Vision selector"), 3, 0)
         model_grid.addWidget(self.cmb_model_vision, 3, 1, 1, 3)
-        model_grid.addWidget(self.lbl_model_mode, 4, 0, 1, 4)
+        model_grid.addWidget(QLabel("Video Generator"), 4, 0)
+        model_grid.addWidget(self.cmb_model_video, 4, 1, 1, 3)
+        model_grid.addWidget(QLabel("TTS"), 5, 0)
+        model_grid.addWidget(self.cmb_model_tts, 5, 1, 1, 3)
+        model_grid.addWidget(self.lbl_model_mode, 6, 0, 1, 4)
         content_layout.addWidget(self._section_title("Model AI"))
         content_layout.addWidget(model_card)
 
@@ -406,6 +426,8 @@ class SettingsDialog(QDialog):
             "transcribe": self.cmb_model_transcribe.currentText(),
             "planner": self.cmb_model_planner.currentText(),
             "vision": self.cmb_model_vision.currentText(),
+            "video": self.cmb_model_video.currentText(),
+            "tts": self.cmb_model_tts.currentText(),
         }
         self._apply_combo_models(
             self.cmb_model_transcribe,
@@ -422,6 +444,16 @@ class SettingsDialog(QDialog):
             self._filter_models_for_task(unique_models, "vision"),
             current_map["vision"],
         )
+        self._apply_combo_models(
+            self.cmb_model_video,
+            self._filter_models_for_task(unique_models, "video"),
+            current_map["video"],
+        )
+        self._apply_combo_models(
+            self.cmb_model_tts,
+            self._filter_models_for_task(unique_models, "tts"),
+            current_map["tts"],
+        )
         self._sync_preview_checkbox()
 
     def _load_existing_values(self):
@@ -432,6 +464,10 @@ class SettingsDialog(QDialog):
         self.inp_projects_root.setText(settings.get("projects_root", ""))
         self.inp_pexels.setText(settings.get("pexels_api_key", ""))
         self.inp_pixabay.setText(settings.get("pixabay_api_key", ""))
+        default_broll = settings.get("default_broll_source", "pexels")
+        idx = self.cmb_default_source.findData(default_broll)
+        if idx >= 0:
+            self.cmb_default_source.setCurrentIndex(idx)
         self.chk_preview.setChecked(bool(settings.get("allow_preview_models", False)))
         self._apply_model_choices(settings.get_global_gemini_models())
         encoder_index = self.cmb_video_encoder.findData(settings.get_video_encoder_mode())
@@ -446,6 +482,8 @@ class SettingsDialog(QDialog):
         self.cmb_model_transcribe.setCurrentText(settings.get_model_for_task("transcribe"))
         self.cmb_model_planner.setCurrentText(settings.get_model_for_task("planner"))
         self.cmb_model_vision.setCurrentText(settings.get_model_for_task("vision"))
+        self.cmb_model_video.setCurrentText(settings.get_model_for_task("video"))
+        self.cmb_model_tts.setCurrentText(settings.get_model_for_task("tts"))
         self._toggle_manual_models()
         self._sync_preview_checkbox()
         if not settings.get_video_encoder_detection().get("checked_at"):
@@ -492,16 +530,18 @@ class SettingsDialog(QDialog):
         if not is_manual:
             self._syncing_model_state = True
             bundle = self._preset_bundle(self.cmb_profile.currentData())
-            self.cmb_model_transcribe.setCurrentText(bundle["transcribe"])
-            self.cmb_model_planner.setCurrentText(bundle["planner"])
-            self.cmb_model_vision.setCurrentText(bundle["vision"])
+            self.cmb_model_transcribe.setCurrentText(bundle.get("transcribe", ""))
+            self.cmb_model_planner.setCurrentText(bundle.get("planner", ""))
+            self.cmb_model_vision.setCurrentText(bundle.get("vision", ""))
+            self.cmb_model_video.setCurrentText(bundle.get("video", "veo-2.0-generate-001"))
+            self.cmb_model_tts.setCurrentText(bundle.get("tts", "gemini-3.1-flash-tts-preview"))
             self._syncing_model_state = False
             self.lbl_model_mode.setText(
                 "Preset aktif. Klik dropdown model tertentu untuk otomatis pindah ke mode Manual."
             )
         else:
             self.lbl_model_mode.setText(
-                "Mode Manual aktif. Kamu bisa memilih model transkripsi, planner, dan vision secara terpisah."
+                "Mode Manual aktif. Kamu bisa memilih model transkripsi, planner, vision, video generator, dan TTS secara terpisah."
             )
         self._sync_preview_checkbox()
 
@@ -518,9 +558,11 @@ class SettingsDialog(QDialog):
         bundle = settings.get_preset_bundle(profile or "balanced")
         if self._available_models:
             bundle = {
-                "transcribe": self._resolve_bundle_model(bundle["transcribe"], "transcribe"),
-                "planner": self._resolve_bundle_model(bundle["planner"], "planner"),
-                "vision": self._resolve_bundle_model(bundle["vision"], "vision"),
+                "transcribe": self._resolve_bundle_model(bundle.get("transcribe", ""), "transcribe"),
+                "planner": self._resolve_bundle_model(bundle.get("planner", ""), "planner"),
+                "vision": self._resolve_bundle_model(bundle.get("vision", ""), "vision"),
+                "video": self._resolve_bundle_model(bundle.get("video", "veo-2.0-generate-001"), "video"),
+                "tts": self._resolve_bundle_model(bundle.get("tts", "gemini-3.1-flash-tts-preview"), "tts"),
             }
         return bundle
 
@@ -538,16 +580,20 @@ class SettingsDialog(QDialog):
 
     def _is_model_compatible(self, model: str, task: str) -> bool:
         name = str(model or "").strip().lower()
+        if task == "video":
+            return "veo" in name
+            
         if not name.startswith("gemini-"):
             return False
-        if "-tts" in name:
-            return False
-        if task != "transcribe" and "native-audio" in name:
-            return False
-        if task != "vision" and "-image-" in name:
-            return False
-        if task == "planner" and ("native-audio" in name or "-image-" in name):
-            return False
+            
+        if task == "transcribe":
+            return "-image-" not in name and "-tts" not in name
+        if task == "planner":
+            return "native-audio" not in name and "-image-" not in name and "-tts" not in name
+        if task == "vision":
+            return "native-audio" not in name and "-tts" not in name
+        if task == "tts":
+            return "tts" in name or "audio" in name
         return True
 
     def _apply_combo_models(self, combo: QComboBox, models: list[str], current: str):
@@ -595,6 +641,14 @@ class SettingsDialog(QDialog):
                 return ["3-flash-preview", "flash-preview", "2.5-flash", "flash", "pro-preview", "pro"]
             if "flash" in preferred_lower:
                 return ["flash", "pro"]
+        if task == "video":
+            if "2.0" in preferred_lower:
+                return ["2.0", "veo"]
+            return ["veo"]
+        if task == "tts":
+            if "3.1" in preferred_lower:
+                return ["3.1", "tts", "audio"]
+            return ["tts", "audio"]
         return ["pro-preview", "flash-preview", "pro", "flash", "flash-lite"]
 
     def _selected_models(self) -> list[str]:
@@ -602,6 +656,8 @@ class SettingsDialog(QDialog):
             self.cmb_model_transcribe.currentText().strip(),
             self.cmb_model_planner.currentText().strip(),
             self.cmb_model_vision.currentText().strip(),
+            self.cmb_model_video.currentText().strip(),
+            self.cmb_model_tts.currentText().strip(),
         ]
 
     def _has_preview_model_selected(self) -> bool:
@@ -719,6 +775,7 @@ class SettingsDialog(QDialog):
                 "gcp_project_id": project_id,
                 "gcp_location": settings.get_vertex_location(),
                 "projects_root": self.inp_projects_root.text().strip(),
+                "default_broll_source": self.cmb_default_source.currentData() or "pexels",
                 "pexels_api_key": self.inp_pexels.text().strip(),
                 "pixabay_api_key": self.inp_pixabay.text().strip(),
                 "allow_preview_models": self.chk_preview.isChecked(),
@@ -727,6 +784,8 @@ class SettingsDialog(QDialog):
                 "gemini_model_transcribe": self.cmb_model_transcribe.currentText(),
                 "gemini_model_planner": self.cmb_model_planner.currentText(),
                 "gemini_model_vision": self.cmb_model_vision.currentText(),
+                "gemini_model_video": self.cmb_model_video.currentText(),
+                "gemini_model_tts": self.cmb_model_tts.currentText(),
                 "video_encoder_mode": self.cmb_video_encoder.currentData() or "auto",
             }
         )

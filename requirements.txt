@@ -1,0 +1,8 @@
+PySide6
+google-generativeai
+keyring
+moviepy
+numpy
+psutil
+requests
+imageio-ffmpeg

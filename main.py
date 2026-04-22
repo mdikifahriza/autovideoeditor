@@ -9,7 +9,6 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon
 from gui.app import MainWindow
 
 

@@ -26,6 +26,14 @@ _GLOBAL_STABLE_GEMINI_MODELS = [
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite-preview",
     "gemini-3.1-pro-preview",
+    "veo-001-generate-001",
+    "veo-2.0-generate-001",
+    "veo-3.0-generate-001",
+    "veo-3.0-fast-generate-001",
+    "veo-3.1-generate-001",
+    "veo-3.1-fast-generate-001",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-tts"
 ]
 _RECOMMENDED_JSON_MODELS = [
     "gemini-3.1-pro-preview",
@@ -36,6 +44,8 @@ _TASK_MODEL_HINTS = {
     "transcribe": ["native-audio", "flash-lite", "flash", "pro"],
     "planner": ["pro", "flash"],
     "vision": ["flash", "pro"],
+    "video": ["veo"],
+    "tts": ["tts", "audio"]
 }
 
 _MODEL_PRESETS = {
@@ -43,16 +53,19 @@ _MODEL_PRESETS = {
         "transcribe": "gemini-2.5-flash",
         "planner": "gemini-2.5-flash",
         "vision": "gemini-2.5-flash-lite",
+        "video": "veo-001-generate-001",
     },
     "balanced": {
         "transcribe": "gemini-2.5-flash",
         "planner": "gemini-2.5-pro",
         "vision": "gemini-2.5-flash",
+        "video": "veo-2.0-generate-001",
     },
     "accurate": {
         "transcribe": "gemini-3.1-flash-lite-preview",
         "planner": "gemini-3.1-pro-preview",
         "vision": "gemini-3-flash-preview",
+        "video": "veo-2.0-generate-001",
     },
 }
 
@@ -66,6 +79,7 @@ _DEFAULTS = {
     "gemini_model_transcribe": "gemini-2.5-flash",
     "gemini_model_planner": "gemini-2.5-pro",
     "gemini_model_vision": "gemini-2.5-flash",
+    "gemini_model_video": "veo-2.0-generate-001",
     "gemini_model_tts": "gemini-3.1-flash-tts-preview",
     "tts_voice_name": "Kore",
     "tts_provider": "gemini",
@@ -77,6 +91,7 @@ _DEFAULTS = {
     "seg_min": 4,
     "seg_max": 12,
     "seg_ideal": 6,
+    "default_broll_source": "pexels",
     "broll_candidates": 5,
     "output_width": 1920,
     "output_height": 1080,
@@ -227,6 +242,7 @@ class SettingsManager:
             "transcribe": self.get("gemini_model_transcribe", fallback),
             "planner": self.get("gemini_model_planner", fallback),
             "vision": self.get("gemini_model_vision", fallback),
+            "video": self.get("gemini_model_video", "veo-2.0-generate-001"),
         }
 
     def get_model_for_task(self, task: str) -> str:

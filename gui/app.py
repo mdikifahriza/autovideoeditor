@@ -1,4 +1,5 @@
 import os
+import sys
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QFont
@@ -60,7 +61,6 @@ class ScriptRefineWorker(QThread):
         try:
             from core.ai_handler import AIHandler
             from core.settings_manager import settings
-            import os
             
             from google.genai import types
             
@@ -236,12 +236,13 @@ class ProcessingWorker(QThread):
     finished = Signal(str)
     error = Signal(str)
 
-    def __init__(self, project_dir: str, audio_path: str, mode: str = "semi_manual"):
+    def __init__(self, project_dir: str, audio_path: str, mode: str = "semi_manual", review_profile: str = "standard"):
         super().__init__()
         self.output_dir = project_dir
         self.paths = get_output_cache_paths(project_dir)
         self.audio_path = audio_path
         self.mode = mode
+        self.review_profile = review_profile
         self.plan_path = self.paths["plan"]
 
     def run(self):
@@ -358,22 +359,90 @@ class ProcessingWorker(QThread):
                 register_artifact(self.output_dir, "search_file", state_paths["search"], stage="broll_search")
 
             if needs_validation:
-                set_project_stage(self.output_dir, "validation", "in_progress")
-                self.progress.emit(3, 4, "Validasi B-roll (Gemini Vision)...")
-                plan = validate_all_segments(
-                    plan,
-                    progress_cb=lambda c, t, m: self.progress.emit(c, t, m),
-                    log_cb=self.log.emit,
-                )
-                plan["validated"] = True
+                if self.review_profile == "full_review":
+                    # Bypass validation for full review (user selects manually later)
+                    plan["validated"] = True
+                    save_plan(plan, self.plan_path)
+                    register_artifact(self.output_dir, "plan_file", self.plan_path, stage="validation")
+                    self.step_done.emit("validated_plan", plan)
+                else:
+                    set_project_stage(self.output_dir, "validation", "in_progress")
+                    self.progress.emit(3, 4, "Validasi B-roll (Gemini Vision)...")
+                    plan = validate_all_segments(
+                        plan,
+                        progress_cb=lambda c, t, m: self.progress.emit(c, t, m),
+                        log_cb=self.log.emit,
+                    )
+                    plan["validated"] = True
+                    save_plan(plan, self.plan_path)
+                    register_artifact(self.output_dir, "plan_file", self.plan_path, stage="validation")
+                    self.step_done.emit("validated_plan", plan)
+
+            # Download MP4s upfront for non-full_review modes
+            if self.review_profile in {"draft_fast", "standard"}:
+                def _log_cb(msg):
+                    self.log.emit(msg)
+                def _progress_cb(c, t, m):
+                    self.download_progress.emit(c, t, m)
+
+                segments = plan.get("segments", [])
+                
+                # Apply forced defaults for draft_fast
+                if self.review_profile == "draft_fast":
+                    for segment in segments:
+                        segment["confirmed"] = True
+
+                missing_count = sum(1 for s in segments if not (
+                    (isinstance(s.get("broll_chosen"), dict) and 
+                     s["broll_chosen"].get("local_path") and 
+                     os.path.exists(s["broll_chosen"]["local_path"])) or
+                    (isinstance(s.get("broll_chosen"), dict) and 
+                     s["broll_chosen"].get("project_local_path") and 
+                     os.path.exists(os.path.join(self.output_dir, s["broll_chosen"]["project_local_path"])))
+                ))
+                
+                done_count = 0
+                for i, segment in enumerate(segments):
+                    chosen = segment.get("broll_chosen")
+                    if not isinstance(chosen, dict):
+                        continue
+                    local = str(chosen.get("local_path", ""))
+                    proj_local = str(chosen.get("project_local_path", ""))
+                    if (local and os.path.exists(local)) or (proj_local and os.path.exists(os.path.join(self.output_dir, proj_local))):
+                        continue
+                        
+                    self.progress.emit(done_count, missing_count, f"Mengunduh klip untuk segmen {i+1}...")
+                    
+                    local_path = ensure_segment_video_available(
+                        segment,
+                        project_dir=self.output_dir,
+                        progress_cb=_progress_cb,
+                        log_cb=_log_cb,
+                    )
+                    
+                    if local_path and os.path.exists(local_path):
+                        segment["broll_load_failed"] = False
+                        segment.pop("broll_load_error", None)
+                    else:
+                        segment["broll_load_failed"] = True
+                        segment["broll_load_error"] = "Gagal mengunduh (Batch Download)."
+                        
+                    done_count += 1
+                
                 save_plan(plan, self.plan_path)
-                register_artifact(self.output_dir, "plan_file", self.plan_path, stage="validation")
-                self.step_done.emit("validated_plan", plan)
 
             set_project_stage(self.output_dir, "preview_render", "not_started")
             set_project_stage(self.output_dir, "review", "in_progress")
-            self.progress.emit(4, 4, "Edit plan siap. Source preview aktif di panel review.")
-            self.finished.emit("")
+            
+            if self.review_profile == "full_review":
+                self.progress.emit(4, 4, "Menunggu pemilihan B-Roll manual...")
+                self.finished.emit("show_selection_panel")
+            elif self.review_profile == "draft_fast":
+                self.progress.emit(4, 4, "Menyiapkan rendering final...")
+                self.finished.emit("start_final_render")
+            else:
+                self.progress.emit(4, 4, "Edit plan siap. Source preview aktif di panel review.")
+                self.finished.emit("")
         except Exception as e:
             import traceback
 
@@ -604,6 +673,8 @@ class ErrorDialog(QDialog):
         self.done(self.GO_HOME_RESULT)
 
 
+from gui.broll_selection_panel import BrollSelectionPanel
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -646,12 +717,14 @@ class MainWindow(QMainWindow):
         self.script_refine_panel = ScriptRefinePanel()
         self.progress_panel = ProgressPanel()
         self.review_panel = ReviewPanel()
+        self.broll_selection_panel = BrollSelectionPanel()
 
         self.stack.addWidget(self.home_panel)
         self.stack.addWidget(self.upload_panel)
         self.stack.addWidget(self.script_refine_panel)
         self.stack.addWidget(self.progress_panel)
         self.stack.addWidget(self.review_panel)
+        self.stack.addWidget(self.broll_selection_panel)
 
         self.toolbar = QToolBar("Main Toolbar")
         self.toolbar.setObjectName("top_toolbar")
@@ -681,6 +754,10 @@ class MainWindow(QMainWindow):
         set_widget_props(self.btn_settings, variant="toolbar")
         self.btn_settings.clicked.connect(self._open_settings)
 
+        self.btn_help = QPushButton("❓")
+        set_widget_props(self.btn_help, variant="toolbar")
+        self.btn_help.clicked.connect(self._show_about_dialog)
+
         self.btn_clear_cache = QPushButton("🗑️")
         set_widget_props(self.btn_clear_cache, variant="toolbar")
         self.btn_clear_cache.clicked.connect(self._clear_cache)
@@ -689,6 +766,7 @@ class MainWindow(QMainWindow):
         utility_layout = QHBoxLayout(utility_controls)
         utility_layout.setContentsMargins(8, 4, 8, 4)
         utility_layout.setSpacing(10)
+        utility_layout.addWidget(self.btn_help)
         utility_layout.addWidget(self.btn_settings)
         utility_layout.addWidget(self.btn_clear_cache)
         self.toolbar.addWidget(utility_controls)
@@ -713,12 +791,34 @@ class MainWindow(QMainWindow):
         self.review_panel.global_settings_changed.connect(self._on_review_global_settings_changed)
         self.review_panel.back_to_home_requested.connect(self._return_to_home)
         self.review_panel.download_missing_requested.connect(self._on_download_missing_requested)
+        self.broll_selection_panel.finished.connect(self._on_broll_selection_finished)
         self.stack.currentChanged.connect(
             lambda _index: (self._refresh_toolbar_state(), self._update_toolbar_context())
         )
         self._review_toolbar_widgets = []
         self._update_toolbar_context()
         self._refresh_toolbar_state()
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(100, self._check_first_setup)
+
+    def _check_first_setup(self):
+        from core.settings_manager import settings
+        from gui.first_setup_dialog import FirstSetupDialog
+
+        pex = settings.get("pexels_api_key", "").strip()
+        pix = settings.get("pixabay_api_key", "").strip()
+        ai_provider = settings.get("ai_provider", "gemini")
+        
+        has_ai = False
+        if ai_provider == "gemini":
+            has_ai = bool(settings.get("gemini_api_key", "").strip())
+        else:
+            has_ai = bool(settings.get("gcp_key_path", "").strip())
+
+        if not pex or not pix or not has_ai:
+            dialog = FirstSetupDialog(self)
+            dialog.exec()
 
     def _stop_preview_worker(self):
         # Disabled for realtime preview overlay
@@ -768,7 +868,36 @@ class MainWindow(QMainWindow):
         # Deprecated
         pass
 
-    def _show_review_panel(self, status_message: str = ""):
+    def _show_broll_selection_panel(self):
+        if not self.plan or not self.output_dir:
+            return
+        self.broll_selection_panel.load_plan(self.plan, self.output_dir)
+        self.stack.setCurrentWidget(self.broll_selection_panel)
+        self.status.showMessage("Pilih B-Roll manual untuk mode Review Penuh.")
+        self._refresh_toolbar_state()
+
+    def _on_broll_selection_finished(self):
+        self.status.showMessage("Menyimpan pilihan dan mengunduh MP4...")
+        from core.planner import load_plan
+        from core.cache_manager import get_output_cache_paths
+        import os
+        paths = get_output_cache_paths(self.output_dir)
+        self.plan = load_plan(paths["plan"])
+        
+        missing_indices = []
+        for index, segment in enumerate(self.plan.get("segments", [])):
+            chosen = segment.get("broll_chosen")
+            if not chosen:
+                continue
+            local = str(chosen.get("local_path", ""))
+            proj_local = str(chosen.get("project_local_path", ""))
+            if not ((local and os.path.exists(local)) or (proj_local and os.path.exists(os.path.join(self.output_dir, proj_local)))):
+                missing_indices.append(index)
+                
+        if missing_indices:
+            self._on_download_missing_requested(missing_indices)
+        else:
+            self._show_review_panel("Edit plan siap. Segmen dapat direview.")
         if not self.plan or not self.output_dir:
             return
 
@@ -831,6 +960,28 @@ class MainWindow(QMainWindow):
         # we have a realtime GPU text overlay in the ReviewPanel.
         self._refresh_toolbar_state()
 
+    def _show_about_dialog(self):
+        from PySide6.QtCore import Qt
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Tentang Auto Video Editor")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            "<h3>Auto Video Editor</h3>"
+            "<p>Aplikasi ini secara otomatis mengedit, mentranskripsikan, "
+            "dan menambahkan video b-roll ke audio Anda menggunakan kehebatan AI.</p>"
+            "<p><b>Cara Pemakaian:</b><br>"
+            "1. Di tab awal, buat nama proyek dan pilih audio MP3.<br>"
+            "2. AI akan menganalisis teks dan membuatkan rencana video (B-Roll).<br>"
+            "3. Lakukan konfirmasi atau ganti video jika tidak cocok di panel Review.<br>"
+            "4. Klik Render Final untuk menggabungkan semuanya menjadi MP4 utuh.</p>"
+            "<p><b>Kontak:</b><br>"
+            "M. Diki Fahriza<br>"
+            "WhatsApp: <a href='https://wa.me/6285123759525'>085123759525</a></p>"
+            "<hr>"
+            "<p><i>Dibuild oleh M. Diki Fahriza dengan Gemini 3.1 Pro Preview dan GPT Codex</i></p>"
+        )
+        msg.exec()
+
     def _open_settings(self):
         from gui.settings_dialog import SettingsDialog
 
@@ -841,6 +992,7 @@ class MainWindow(QMainWindow):
     def _add_to_history(self, path: str):
         if not path:
             return
+        from core.settings_manager import settings
         history = settings.get("project_history", [])
         if path in history:
             history.remove(path)
@@ -870,9 +1022,12 @@ class MainWindow(QMainWindow):
             self.draft_path = get_latest_preview_draft_path(self.output_dir, self.plan, self.audio_path) if self.plan else ""
 
             if self.plan:
-                self._show_review_panel(
-                    f"Proyek {os.path.basename(self.output_dir)} berhasil dibuka. Source preview aktif."
-                )
+                if self.current_review_profile == "full_review" and not all(s.get("confirmed") for s in self.plan.get("segments", [])):
+                    self._show_broll_selection_panel()
+                else:
+                    self._show_review_panel(
+                        f"Proyek {os.path.basename(self.output_dir)} berhasil dibuka. Source preview aktif."
+                    )
             elif self.audio_path and os.path.exists(self.audio_path):
                 self.status.showMessage("Melanjutkan proyek dari progres yang tersimpan...")
                 self._restart_current_project()
@@ -903,7 +1058,12 @@ class MainWindow(QMainWindow):
             self._refresh_toolbar_state()
 
     def _load_styles(self):
-        qss_path = os.path.join(os.path.dirname(__file__), "style.qss")
+        # Gunakan path relatif _MEIPASS jika berjalan dari PyInstaller EXE
+        if hasattr(sys, '_MEIPASS'):
+            qss_path = os.path.join(sys._MEIPASS, "gui", "style.qss")
+        else:
+            qss_path = os.path.join(os.path.dirname(__file__), "style.qss")
+            
         if os.path.exists(qss_path):
             with open(qss_path, encoding="utf-8") as f:
                 self.setStyleSheet(f.read())
@@ -926,7 +1086,7 @@ class MainWindow(QMainWindow):
             self.progress_panel.append_log(initial_log)
 
         self._retry_action = lambda: self._restart_current_project()
-        self.worker = ProcessingWorker(self.output_dir, self.audio_path, self.current_project_mode)
+        self.worker = ProcessingWorker(self.output_dir, self.audio_path, self.current_project_mode, self.current_review_profile)
         self.worker.progress.connect(self.progress_panel.update_progress)
         self.worker.download_progress.connect(self.progress_panel.update_download_status)
         self.worker.log.connect(self.progress_panel.append_log)
@@ -1101,8 +1261,15 @@ class MainWindow(QMainWindow):
         self.worker.wait()
         self.worker = None
         self._retry_action = None
-        self.draft_path = draft_path
-        self._show_review_panel("Edit plan siap. Source preview aktif, rendered preview tersedia saat diminta.")
+        
+        if draft_path == "start_final_render":
+            self.status.showMessage("Memulai proses render final...")
+            self._on_final_render()
+        elif draft_path == "show_selection_panel":
+            self._show_broll_selection_panel()
+        else:
+            self.draft_path = draft_path
+            self._show_review_panel("Edit plan siap. Segmen dapat direview.")
 
     def _on_rerender_segment(self, segment_id: int):
         if not self.plan:
@@ -1247,6 +1414,7 @@ class MainWindow(QMainWindow):
             "Selesai!",
             f"Video final berhasil dirender!\n\n{path}\n\nFolder proyek:\n{self.output_dir}{avep_msg}",
         )
+        self.review_panel.load_plan(self.plan, self.audio_path, self.output_dir)
         self.stack.setCurrentWidget(self.review_panel)
         self._refresh_toolbar_state()
 
@@ -1292,6 +1460,7 @@ class MainWindow(QMainWindow):
             "Gagal render final",
             f"Gagal render final.\n\n{msg}\n\nCoba periksa aset proyek lalu render ulang.",
         )
+        self.review_panel.load_plan(self.plan, self.audio_path, self.output_dir)
         self.stack.setCurrentWidget(self.review_panel)
         self._refresh_toolbar_state()
 
@@ -1303,13 +1472,13 @@ class MainWindow(QMainWindow):
         self.worker.plan_path = paths["plan"]
         
         self.worker.progress.connect(self.progress_panel.update_progress)
-        self.worker.download_progress.connect(self.progress_panel.update_download_progress)
+        self.worker.download_progress.connect(self.progress_panel.update_download_status)
         self.worker.log.connect(self.progress_panel.append_log)
         self.worker.step_done.connect(self._on_step_done)
         self.worker.finished.connect(self._on_download_missing_finished)
         self.worker.error.connect(self._on_error)
         
-        self.stack.setCurrentWidget(self.script_refine_panel)
+        self.stack.setCurrentWidget(self.progress_panel)
         self.progress_panel.reset(f"Mengunduh {len(indices)} klip video...")
         
         self.worker.start()

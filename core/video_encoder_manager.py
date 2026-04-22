@@ -21,6 +21,13 @@ def normalize_encoder_mode(mode: str | None) -> str:
 
 
 def find_ffmpeg_executable() -> str:
+    import sys
+    # Saat jalan di EXE (PyInstaller bundle)
+    if hasattr(sys, '_MEIPASS'):
+        bundled_exe = os.path.join(sys._MEIPASS, "ffmpeg.exe")
+        if os.path.exists(bundled_exe):
+            return bundled_exe
+
     env_path = os.environ.get("IMAGEIO_FFMPEG_EXE", "").strip()
     if env_path and os.path.exists(env_path):
         return env_path

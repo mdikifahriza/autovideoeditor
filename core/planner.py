@@ -39,15 +39,23 @@ PLANNER_BATCH_SCHEMA = {
 }
 
 PLANNER_SYSTEM_PROMPT = """
-Kamu adalah editor video YouTube.
-Tugasmu hanya mengisi metadata kreatif untuk blok visual yang sudah dipotong lokal.
+Kamu adalah B-Roll Editor.
+Tugas: memecah input teks menjadi array JSON.
+Setiap item mewakili satu segmen dengan metadata kreatif.
+
+Contoh output:
+{
+  "items": [
+    {
+      "id": 0,
+      "k": ["nature", "forest"],
+      "emp": null
+    }
+  ]
+}
 
 Aturan:
-- Gunakan id segmen yang sama seperti input.
-- k = 2 sampai 3 keyword B-roll dalam bahasa Inggris.
-- tin dan tout harus dipilih dari daftar transisi yang tersedia.
-- fx harus dipilih dari daftar efek yang tersedia.
-- grade harus dipilih dari daftar color grade yang tersedia.
+- k harus array string keyword pencarian b-roll (satu atau dua kata).
 - emp berisi teks emphasis singkat dalam bahasa Indonesia atau null jika tidak perlu.
 - Jangan ulang transcript.
 - Jaga output sependek mungkin.
@@ -105,6 +113,7 @@ def generate_edit_plan(raw_segments: list[dict], total_duration: float, log_cb=N
 
 
 def _build_local_visual_segments(raw_segments: list[dict], total_duration: float) -> list[dict]:
+    import math
     cleaned = []
     for raw in raw_segments:
         text = str(raw.get("text", "")).strip()
@@ -114,7 +123,20 @@ def _build_local_visual_segments(raw_segments: list[dict], total_duration: float
         end = _safe_float(raw.get("end", start + 1.0), start + 1.0)
         if end <= start:
             end = start + 1.0
-        cleaned.append({"start": start, "end": end, "text": text})
+            
+        duration = end - start
+        if duration > SEG_MAX:
+            pieces = math.ceil(duration / SEG_MAX)
+            words = text.split()
+            words_per_piece = math.ceil(len(words) / pieces) if pieces > 0 and len(words) > 0 else 1
+            piece_dur = duration / pieces
+            for i in range(pieces):
+                p_start = start + i * piece_dur
+                p_end = start + (i + 1) * piece_dur if i < pieces - 1 else end
+                p_text = " ".join(words[i * words_per_piece : (i + 1) * words_per_piece])
+                cleaned.append({"start": p_start, "end": p_end, "text": p_text})
+        else:
+            cleaned.append({"start": start, "end": end, "text": text})
 
     if not cleaned:
         return []
@@ -144,7 +166,38 @@ def _build_local_visual_segments(raw_segments: list[dict], total_duration: float
         groups.append(current_group)
 
     groups = _merge_short_groups(groups)
-    return [_group_to_segment(group, idx, total_duration) for idx, group in enumerate(groups)]
+    segments_out = []
+    for idx, group in enumerate(groups):
+        segments_out.append(_group_to_segment(group, idx, total_duration))
+        
+    if segments_out:
+        last_end = float(segments_out[-1]["end"])
+        while last_end < total_duration:
+            gap = total_duration - last_end
+            filler_dur = min(gap, SEG_MAX)
+            new_end = last_end + filler_dur
+            idx = len(segments_out)
+            segments_out.append({
+                "id": idx,
+                "start": last_end,
+                "end": new_end,
+                "render_duration": max(1.0, filler_dur),
+                "transcript": "",
+                "subtitle_text": "",
+                "broll_keywords": ["nature"],
+                "broll_chosen": None,
+                "broll_candidates": [],
+                "transition_in": "cut",
+                "transition_out": "cut",
+                "effect": "static",
+                "color_grade": "neutral",
+                "emphasis_text": None,
+                "floating_text_mode": "inherit",
+                "confirmed": False,
+            })
+            last_end = new_end
+            
+    return segments_out
 
 
 def _merge_short_groups(groups: list[list[dict]]) -> list[list[dict]]:
@@ -279,12 +332,6 @@ def _request_batch_items(client, model_name: str, batch_payload: list[dict], bat
 def _build_batch_prompt(batch_payload: list[dict]) -> str:
     return (
         PLANNER_SYSTEM_PROMPT
-        + "\n\nPilihan transition: "
-        + ", ".join(AVAILABLE_TRANSITIONS)
-        + "\nPilihan effect: "
-        + ", ".join(AVAILABLE_EFFECTS)
-        + "\nPilihan color grade: "
-        + ", ".join(AVAILABLE_GRADES)
         + "\n\nInput segmen:\n"
         + json.dumps(batch_payload, ensure_ascii=False, indent=2)
     )
@@ -322,13 +369,10 @@ def _apply_batch_items(batch: list[dict], items: list[dict]):
         if not item:
             continue
         segment["broll_keywords"] = _sanitize_keywords(item.get("k") or item.get("broll_keywords"))
-        segment["transition_in"] = _sanitize_transition(item.get("tin") or item.get("transition_in"), "cut")
-        segment["transition_out"] = _sanitize_transition(
-            item.get("tout") or item.get("transition_out"),
-            "cut",
-        )
-        segment["effect"] = _sanitize_effect(item.get("fx") or item.get("effect"))
-        segment["color_grade"] = _sanitize_grade(item.get("grade") or item.get("color_grade"))
+        segment["transition_in"] = "cut"
+        segment["transition_out"] = "cut"
+        segment["effect"] = "static"
+        segment["color_grade"] = "neutral"
         segment["emphasis_text"] = _sanitize_emphasis(item.get("emp", item.get("emphasis_text")))
 
 

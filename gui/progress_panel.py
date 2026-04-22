@@ -125,9 +125,9 @@ class ProgressPanel(QWidget):
 
         console_layout.addLayout(button_row)
 
-    def reset(self):
+    def reset(self, initial_message: str = "Memulai..."):
         self.bar.setValue(0)
-        self.message.setText("Memulai...")
+        self.message.setText(initial_message)
         self.step_label.setText("Langkah 0 / 0")
         self.download_label.setText("")
         self.log_console.clear()

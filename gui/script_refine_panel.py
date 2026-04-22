@@ -1,5 +1,5 @@
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtCore import Qt, Signal, QUrl, QThread
+from PySide6.QtCore import Signal, QUrl, QThread
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
 from core.tts_provider import AVAILABLE_TTS_VOICES, GeminiTTSProvider
 from gui.ui_theme import set_widget_props
 import os
-import time
 
 class TTSPreviewWorker(QThread):
     finished = Signal(str)

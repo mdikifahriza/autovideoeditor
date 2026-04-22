@@ -640,7 +640,7 @@ def _render_segment_moviepy(
     output_dir: str = "",
     download_cb=None,
     profile: dict = None,
-) -> "VideoClip":
+):
     """MoviePy render untuk preview 360p — simplify_visuals=True."""
     profile = profile or get_render_profile("preview")
     render_w = int(profile["width"])

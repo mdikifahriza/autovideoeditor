@@ -16,7 +16,6 @@ from core.project_manager import get_project_paths
 from core.settings_manager import settings
 from config import (
     BROLL_CANDIDATES, BROLL_CACHE_DIR,
-    OUTPUT_WIDTH, OUTPUT_HEIGHT,
 )
 
 DOWNLOAD_RETRY_PER_CANDIDATE = 3
@@ -76,10 +75,20 @@ def fetch_candidates_for_plan(plan: dict, project_dir: str = "", progress_cb=Non
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def _search_candidates(query: str, min_duration: float) -> list[dict]:
-    """Cari di Pexels dulu, kalau kurang fallback ke Pixabay."""
-    results = _search_pexels(query, min_duration)
-    if len(results) < 2:
-        results += _search_pixabay(query, min_duration)
+    """Cari berdasarkan default source dulu, kalau kurang fallback ke yang lain."""
+    from core.settings_manager import settings
+    default_source = settings.get("default_broll_source", "pexels")
+    
+    results = []
+    if default_source == "pexels":
+        results = _search_pexels(query, min_duration)
+        if len(results) < 2:
+            results += _search_pixabay(query, min_duration)
+    else:
+        results = _search_pixabay(query, min_duration)
+        if len(results) < 2:
+            results += _search_pexels(query, min_duration)
+            
     deduped = []
     seen_ids = set()
     for candidate in results:
@@ -94,18 +103,18 @@ def _search_candidates(query: str, min_duration: float) -> list[dict]:
 
 
 def _generate_veo(query: str, min_duration: float, project_dir: str = "") -> list[dict]:
-    """Generate a video using Vertex AI Veo-2.0 via google-genai SDK."""
-    from core.ai_handler import AIHandler, VideoGenerationError
+    """Generate a video using Vertex AI Veo via google-genai SDK."""
+    from core.ai_handler import AIHandler
     from core.settings_manager import settings
-    from google import genai
     from google.genai import types
     import time
     
     try:
         client = AIHandler.get_client()
+        model_name = settings.get_model_for_task("video")
         
         operation = client.models.generate_videos(
-            model='veo-2.0-generate-001',
+            model=model_name,
             prompt=query,
             config=types.GenerateVideosConfig(
                 number_of_videos=1,
